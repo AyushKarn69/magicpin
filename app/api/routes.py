@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 
 from app.api.dependencies import (
     get_context_manager,
