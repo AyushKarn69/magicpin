@@ -222,8 +222,6 @@ async def reply(
     # Get or create conversation session
     session = conversation_store.get_session(request.conversation_id)
     if not session:
-        if request.turn_number != 1:
-            raise HTTPException(status_code=404, detail="Conversation not found")
         conversation_store.create_session(
             conversation_id=request.conversation_id,
             merchant_id=request.merchant_id,
