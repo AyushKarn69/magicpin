@@ -1,17 +1,19 @@
 """FastAPI routes for challenge endpoints."""
 
+import asyncio
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Response
 
 from app.api.dependencies import (
     get_context_manager,
+    get_context_store,
     get_conversation_store,
     get_decision_engine,
     get_intent_detector,
     get_knowledge_graph,
+    get_llm_provider,
 )
 from app.api.models import (
     ContextPushRequest,
@@ -26,15 +28,22 @@ from app.api.models import (
 )
 from app.context.knowledge_graph import KnowledgeGraph
 from app.context.manager import ContextManager
+from app.context.stores import ContextStore
 from app.engine.decision_engine import DecisionEngine
+from app.llm.provider import LLMProvider
 from app.memory.conversation_store import ConversationStore
 from app.memory.intent_detector import IntentDetector
 from app.models.conversation import ConversationState
+from app.models.decision import DecisionCard
+from app.prompts.prompt_compiler import PromptCompiler
 from app.utils.config import get_settings
 from app.utils.logging import get_logger
+from app.validators.output_validator import OutputValidator
 
 logger = get_logger(__name__)
 router = APIRouter()
+prompt_compiler = PromptCompiler()
+output_validator = OutputValidator()
 
 # Track server start time
 _start_time = time.time()
@@ -76,6 +85,7 @@ async def metadata() -> MetadataResponse:
 @router.post("/v1/context", response_model=ContextPushResponse)
 async def push_context(
     request: ContextPushRequest,
+    response: Response,
     context_manager: ContextManager = Depends(get_context_manager),
     knowledge_graph: KnowledgeGraph = Depends(get_knowledge_graph),
 ) -> ContextPushResponse:
@@ -88,13 +98,11 @@ async def push_context(
     )
 
     if request.scope not in {"category", "merchant", "customer", "trigger"}:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "accepted": False,
-                "reason": "invalid_scope",
-                "details": f"Unsupported scope: {request.scope}",
-            },
+        response.status_code = 400
+        return ContextPushResponse(
+            accepted=False,
+            reason="invalid_scope",
+            details=f"Unsupported scope: {request.scope}",
         )
 
     try:
@@ -107,13 +115,11 @@ async def push_context(
         )
 
         if not success:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "accepted": False,
-                    "reason": "stale_version",
-                    "current_version": current_version,
-                },
+            response.status_code = 409
+            return ContextPushResponse(
+                accepted=False,
+                reason="stale_version",
+                current_version=current_version,
             )
 
         # Update knowledge graph
@@ -201,6 +207,8 @@ async def reply(
     request: ReplyRequest,
     conversation_store: ConversationStore = Depends(get_conversation_store),
     intent_detector: IntentDetector = Depends(get_intent_detector),
+    context_store: ContextStore = Depends(get_context_store),
+    llm_provider: LLMProvider = Depends(get_llm_provider),
 ) -> ReplyResponse:
     """Handle merchant/customer reply."""
     logger.info(
@@ -213,7 +221,6 @@ async def reply(
     # Get or create conversation session
     session = conversation_store.get_session(request.conversation_id)
     if not session:
-        # Create a new conversation session if it doesn't exist
         conversation_store.create_session(
             conversation_id=request.conversation_id,
             merchant_id=request.merchant_id,
@@ -238,10 +245,22 @@ async def reply(
         intent=intent,
     )
     
-    # Handle auto-reply
+    # Deterministic State Machine & Action Decision Rules
     if auto_reply:
-        if session.auto_reply_count >= 2:
-            # End conversation after 2 auto-replies
+        if session.auto_reply_count == 1:
+            fallback_body = "Understood. Is there someone else I could connect with about this?"
+            fallback_cta = "open_ended"
+            fallback_rationale = "Auto-reply detected - attempting clarification"
+        elif session.auto_reply_count == 2:
+            conversation_store.transition_state(
+                request.conversation_id, ConversationState.WAITING
+            )
+            return ReplyResponse(
+                action="wait",
+                wait_seconds=86400,
+                rationale="Second consecutive auto-reply detected - waiting 24 hours",
+            )
+        else:
             conversation_store.transition_state(
                 request.conversation_id, ConversationState.ENDED
             )
@@ -249,32 +268,6 @@ async def reply(
                 action="end",
                 rationale="Multiple auto-replies detected - ending conversation",
             )
-        else:
-            # Try one more time
-            return ReplyResponse(
-                action="send",
-                body="Understood. Is there someone else I could connect with about this?",
-                cta="open_ended",
-                rationale="Auto-reply detected - attempting clarification",
-            )
-    
-    # Handle intent-based transitions
-    if intent == "COMMITMENT":
-        # Transition to ACTION state on commitment (regardless of current state)
-        conversation_store.transition_state(
-            request.conversation_id, ConversationState.ACTION
-        )
-        return ReplyResponse(
-            action="send",
-            body=(
-                "I'm preparing the campaign draft now using the current context. "
-                "I'll also line up the next Google Business post. Reply CONFIRM "
-                "and I'll finalize both."
-            ),
-            cta="binary_confirm",
-            rationale="Merchant committed - transitioning to action",
-        )
-    
     elif intent == "REJECTION":
         conversation_store.transition_state(
             request.conversation_id, ConversationState.ENDED
@@ -283,26 +276,122 @@ async def reply(
             action="end",
             rationale="Merchant not interested - ending conversation gracefully",
         )
-    
-    elif intent == "QUESTION":
-        return ReplyResponse(
-            action="send",
-            body=(
-                "That part is outside this workflow, so I'll keep this focused on "
-                "the current business action. I can prepare the draft from the "
-                "verified context now. Reply CONFIRM to proceed."
-            ),
-            cta="open_ended",
-            rationale="Merchant asked question - providing clarification",
+    elif intent == "COMMITMENT":
+        conversation_store.transition_state(
+            request.conversation_id, ConversationState.ACTION
         )
-    
-    # Default: acknowledge and continue
-    return ReplyResponse(
-        action="send",
-        body=(
+        fallback_body = (
+            "I'm preparing the campaign draft now using the current context. "
+            "I'll also line up the next Google Business post. Reply CONFIRM "
+            "and I'll finalize both."
+        )
+        fallback_cta = "binary_confirm"
+        fallback_rationale = "Merchant committed - transitioning to action"
+    elif intent == "QUESTION":
+        fallback_body = (
+            "That part is outside this workflow, so I'll keep this focused on "
+            "the current business action. I can prepare the draft from the "
+            "verified context now. Reply CONFIRM to proceed."
+        )
+        fallback_cta = "open_ended"
+        fallback_rationale = "Merchant asked question - providing clarification"
+    else:  # NEUTRAL / INFORMATION_PROVIDED / Default
+        fallback_body = (
             "I've noted this and am preparing the next business draft from the "
             "current context. Reply CONFIRM if you want me to finalize it now."
-        ),
-        cta="binary_confirm",
-        rationale="Continuing conversation",
+        )
+        fallback_cta = "binary_confirm"
+        fallback_rationale = "Continuing conversation"
+
+    # Action is "send": Attempt LLM realization with fallback safety
+    try:
+        merchant_id = session.merchant_id or request.merchant_id
+        merchant = context_store.merchants.get(merchant_id) if merchant_id else None
+        category = (
+            context_store.categories.get(merchant.category_slug)
+            if (merchant and merchant.category_slug)
+            else None
+        )
+        customer = (
+            context_store.customers.get(session.customer_id)
+            if session.customer_id
+            else None
+        )
+
+        history_facts = [
+            f"{turn.from_role}: {turn.message}"
+            for turn in session.history[-3:]
+        ] or [f"merchant: {request.message}"]
+
+        card_cta = (
+            "binary_yes_stop"
+            if fallback_cta in ("binary_confirm", "binary_yes_stop")
+            else "open_ended"
+        )
+
+        card = DecisionCard(
+            decision=f"Respond to merchant message (intent: {intent})",
+            priority=3,
+            facts=history_facts[:5],
+            reason=f"Merchant sent turn {request.turn_number} with intent {intent}",
+            cta=card_cta,
+            tone=category.voice.tone if (category and category.voice) else "warm_retail",
+            audience="merchant",
+            send_as="vera",
+            constraints={"max_body_length": 500},
+            suppression_key=f"reply:{request.conversation_id}:{request.turn_number}",
+            merchant_id=merchant_id or "unknown",
+            customer_id=session.customer_id or request.customer_id,
+            trigger_id="reply",
+        )
+
+        prompt = prompt_compiler.compile(
+            card=card,
+            merchant=merchant,
+            category=category,
+            customer=customer,
+            trigger=None,
+        )
+
+        cache_key = f"reply:{request.conversation_id}:{request.turn_number}"
+        raw_response = await asyncio.wait_for(
+            asyncio.to_thread(llm_provider.compose, prompt, cache_key),
+            timeout=7.0,
+        )
+
+        parsed, validation = output_validator.validate_raw_response(
+            raw_response,
+            card=card,
+            category=category,
+            merchant=merchant,
+            customer=customer,
+            trigger=None,
+        )
+
+        if validation.valid and parsed and parsed.body:
+            return ReplyResponse(
+                action="send",
+                body=parsed.body,
+                cta=parsed.cta or fallback_cta,
+                rationale=parsed.rationale or fallback_rationale,
+            )
+        else:
+            logger.warning(
+                "reply_llm_validation_failed",
+                errors=validation.errors if validation else [],
+                conversation_id=request.conversation_id,
+            )
+    except Exception as e:
+        logger.warning(
+            "reply_llm_fallback_used",
+            error=str(e),
+            conversation_id=request.conversation_id,
+        )
+
+    # Fallback to deterministic response if LLM or validation failed or timed out
+    return ReplyResponse(
+        action="send",
+        body=fallback_body,
+        cta=fallback_cta,
+        rationale=fallback_rationale,
     )

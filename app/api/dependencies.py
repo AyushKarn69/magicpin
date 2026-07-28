@@ -58,10 +58,10 @@ def get_app_state() -> AppState:
         _app_state = AppState()
     return _app_state
 
-
 def get_context_store() -> ContextStore:
     """Dependency: context store."""
     return get_app_state().context_store
+
 
 
 def get_context_manager() -> ContextManager:
@@ -87,3 +87,8 @@ def get_decision_engine() -> DecisionEngine:
 def get_intent_detector() -> IntentDetector:
     """Dependency: intent detector."""
     return get_app_state().intent_detector
+
+
+def get_llm_provider() -> LLMProvider:
+    """Dependency: LLM provider."""
+    return get_app_state().llm_provider
