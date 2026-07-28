@@ -7,7 +7,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.api.dependencies import (
-    get_context_store,
     get_context_manager,
     get_conversation_store,
     get_decision_engine,
@@ -27,7 +26,6 @@ from app.api.models import (
 )
 from app.context.knowledge_graph import KnowledgeGraph
 from app.context.manager import ContextManager
-from app.context.stores import ContextStore
 from app.engine.decision_engine import DecisionEngine
 from app.memory.conversation_store import ConversationStore
 from app.memory.intent_detector import IntentDetector
@@ -268,8 +266,12 @@ async def reply(
         )
         return ReplyResponse(
             action="send",
-            body="Great! Let me get that started for you right away.",
-            cta="none",
+            body=(
+                "I'm preparing the campaign draft now using the current context. "
+                "I'll also line up the next Google Business post. Reply CONFIRM "
+                "and I'll finalize both."
+            ),
+            cta="binary_confirm",
             rationale="Merchant committed - transitioning to action",
         )
     
@@ -285,7 +287,11 @@ async def reply(
     elif intent == "QUESTION":
         return ReplyResponse(
             action="send",
-            body="Good question. Let me clarify that for you...",
+            body=(
+                "That part is outside this workflow, so I'll keep this focused on "
+                "the current business action. I can prepare the draft from the "
+                "verified context now. Reply CONFIRM to proceed."
+            ),
             cta="open_ended",
             rationale="Merchant asked question - providing clarification",
         )
@@ -293,7 +299,10 @@ async def reply(
     # Default: acknowledge and continue
     return ReplyResponse(
         action="send",
-        body="Thanks for the info. I'll process that and follow up shortly.",
-        cta="none",
+        body=(
+            "I've noted this and am preparing the next business draft from the "
+            "current context. Reply CONFIRM if you want me to finalize it now."
+        ),
+        cta="binary_confirm",
         rationale="Continuing conversation",
     )

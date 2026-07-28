@@ -1,6 +1,6 @@
 """Feature extraction from raw contexts."""
 
-from datetime import datetime
+from datetime import datetime, UTC
 
 from app.models.contexts import (
     CategoryContext,
@@ -110,9 +110,10 @@ class FeatureExtractor:
                 )
                 if most_recent.started:
                     started_date = datetime.fromisoformat(most_recent.started)
-                    features.offer_recency_days = (
-                        datetime.utcnow() - started_date
-                    ).days
+                    if started_date.tzinfo is None:
+                        started_date = started_date.replace(tzinfo=UTC)
+                    now = datetime.now(started_date.tzinfo)
+                    features.offer_recency_days = (now - started_date).days
             except (ValueError, AttributeError):
                 pass
 
@@ -136,7 +137,10 @@ class FeatureExtractor:
             last_turn = merchant.conversation_history[-1]
             try:
                 last_ts = datetime.fromisoformat(last_turn.ts.replace("Z", "+00:00"))
-                days_since = (datetime.utcnow() - last_ts).days
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=UTC)
+                now = datetime.now(last_ts.tzinfo or UTC)
+                days_since = (now - last_ts).days
                 features.days_since_last_vera_contact = days_since
                 features.last_engagement_type = last_turn.engagement
             except (ValueError, AttributeError):

@@ -3,23 +3,35 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # Category Context Models
 class VoiceProfile(BaseModel):
     """Voice and tone guidelines for a category."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     tone: str = Field(..., description="Tone style (e.g., peer_clinical, warm_retail)")
     vocab_allowed: list[str] = Field(default_factory=list)
-    vocab_taboo: list[str] = Field(default_factory=list)
+    vocab_taboo: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("vocab_taboo", "taboos"),
+    )
+
+    @property
+    def taboos(self) -> list[str]:
+        """Compatibility alias for call sites that use challenge terminology."""
+        return self.vocab_taboo
 
 
 class PeerStats(BaseModel):
     """Peer benchmark statistics."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     avg_rating: float
-    avg_review_count: int
+    avg_review_count: int = Field(validation_alias=AliasChoices("avg_review_count", "avg_reviews"))
     avg_ctr: float
     scope: str = Field(..., description="Scope of peer group (e.g., delhi_solo_practices)")
 

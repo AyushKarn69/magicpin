@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AliasChoices, BaseModel, Field, ValidationError
 
 from app.models.contexts import CategoryContext, CustomerContext, MerchantContext, TriggerContext
 from app.models.decision import DecisionCard
@@ -18,9 +18,11 @@ logger = get_logger(__name__)
 class LLMMessage(BaseModel):
     """Structured response expected from the LLM."""
 
-    message: str
-    cta: str
+    action: str = "send"
+    body: str = Field(validation_alias=AliasChoices("body", "message"))
+    cta: str | None
     rationale: str
+    wait_seconds: int | None = None
 
 
 class ValidationResult(BaseModel):
@@ -113,7 +115,7 @@ class OutputValidator:
             return None, ValidationResult(valid=False, errors=parse_errors)
 
         result = self.validate(
-            message=parsed.message,
+            message=parsed.body,
             card=card,
             category=category,
             merchant=merchant,
@@ -122,6 +124,9 @@ class OutputValidator:
             response_cta=parsed.cta,
             rationale=parsed.rationale,
         )
+        if parsed.action != "send":
+            result.errors.append("Proactive Decision Card realization must use action=send")
+            result.valid = False
         return parsed, result
 
     def _validate_category_tone(

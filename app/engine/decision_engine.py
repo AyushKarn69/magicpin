@@ -256,7 +256,7 @@ class DecisionEngine:
         )
 
         if validation.valid:
-            return parsed_response.message if parsed_response else raw_response, parsed_response, validation
+            return parsed_response.body if parsed_response else raw_response, parsed_response, validation
 
         retry_response = self.llm_provider.compose(prompt, cache_key=f"{cache_key}:retry")
         parsed_retry, retry_validation = self.output_validator.validate_raw_response(
@@ -270,7 +270,7 @@ class DecisionEngine:
 
         if retry_validation.valid:
             return (
-                parsed_retry.message if parsed_retry else retry_response,
+                parsed_retry.body if parsed_retry else retry_response,
                 parsed_retry,
                 retry_validation,
             )
@@ -290,7 +290,7 @@ class DecisionEngine:
         )
 
         if parsed_fallback is not None and fallback_validation.valid:
-            return parsed_fallback.message, parsed_fallback, fallback_validation
+            return parsed_fallback.body, parsed_fallback, fallback_validation
 
         return (
             fallback_response,

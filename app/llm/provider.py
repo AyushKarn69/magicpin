@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from groq import Groq
 
 from app.utils.logging import get_logger
 
@@ -39,54 +37,53 @@ class LLMProvider(ABC):
     @abstractmethod
     def compose(self, prompt: str, cache_key: str | None = None) -> str:
         """Generate a structured JSON response from a prompt."""
+        raise NotImplementedError
 
     @abstractmethod
     def health_check(self) -> bool:
         """Return whether the provider is configured and reachable."""
+        raise NotImplementedError
 
     @abstractmethod
     def retry(self, prompt: str, cache_key: str | None = None) -> str:
         """Retry a provider call according to provider policy."""
+        raise NotImplementedError
 
 
 class FallbackTemplateProvider(LLMProvider):
-    """Deterministic category templates used when the model path is unavailable."""
+    """Deterministic category templates used when OpenAI is unavailable."""
 
     def compose(self, prompt: str, cache_key: str | None = None) -> str:
+        requested_cta = self._requested_cta(prompt)
         prompt_lower = prompt.lower()
+
         if "dentists" in prompt_lower or "peer_clinical" in prompt_lower:
-            message = (
-                "Quick note: one relevant dental update is ready from the facts above. "
-                "Want me to draft the patient-facing WhatsApp from it?"
-            )
+            base = "Quick note: one relevant dental update is ready from the verified facts."
         elif "restaurants" in prompt_lower:
-            message = (
-                "Quick operational nudge from today's trigger. Want me to turn this "
-                "into a short customer message using your active offer?"
-            )
+            base = "Quick operational nudge from today's verified trigger."
         elif "salons" in prompt_lower:
-            message = (
-                "Quick salon update: this trigger looks useful for your next post. "
-                "Want me to draft a 4-line WhatsApp for customers?"
-            )
+            base = "Quick salon update: this trigger is ready for a short customer draft."
         elif "gyms" in prompt_lower:
-            message = (
-                "Quick fitness update from your dashboard. Want me to draft a simple "
-                "member message for this?"
-            )
+            base = "Quick fitness update from the supplied context."
         elif "pharmacies" in prompt_lower:
-            message = (
-                "Quick pharmacy update: this needs a precise customer note. Want me "
-                "to draft it from the verified details?"
-            )
+            base = "Quick pharmacy update: this needs a precise customer note."
         else:
-            message = "Quick update from Vera. Want me to draft the next message?"
+            base = "Quick update from Vera."
+
+        if requested_cta == "binary_yes_stop":
+            body = f"{base} Reply YES and I will draft it, or STOP to skip."
+        elif requested_cta == "none":
+            body = base
+        else:
+            body = f"{base} Want me to draft the next message?"
 
         return json.dumps(
             {
-                "message": message,
-                "cta": "open_ended" if "?" in message else "none",
+                "action": "send",
+                "body": body,
+                "cta": requested_cta,
                 "rationale": "Deterministic fallback template used.",
+                "wait_seconds": None,
             }
         )
 
@@ -96,13 +93,23 @@ class FallbackTemplateProvider(LLMProvider):
     def retry(self, prompt: str, cache_key: str | None = None) -> str:
         return self.compose(prompt, cache_key=cache_key)
 
+    def _requested_cta(self, prompt: str) -> str:
+        try:
+            parsed = json.loads(prompt)
+            cta = parsed.get("decision_card", {}).get("cta")
+            if cta in {"binary_yes_stop", "open_ended", "none"}:
+                return str(cta)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+        return "open_ended"
+
 
 class MockLLMProvider(FallbackTemplateProvider):
     """Backward-compatible test provider alias."""
 
 
 class OpenAIProvider(LLMProvider):
-    """Production Groq provider with retries, caching, and cost logging."""
+    """Production OpenAI provider with retries, caching, and cost logging."""
 
     def __init__(
         self,
@@ -112,18 +119,12 @@ class OpenAIProvider(LLMProvider):
         timeout_seconds: float = 15.0,
         max_retries: int = 2,
         backoff_base_seconds: float = 0.5,
-        azure_endpoint: str | None = None,
-        azure_api_version: str | None = None,
-        use_azure: bool | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("magicpin", "")
-        self.model_name = model_name or "llama-3.3-70b-versatile"
+        self.api_key = api_key
+        self.model_name = model_name
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
-        self.azure_endpoint = azure_endpoint or ""
-        self.azure_api_version = azure_api_version or "2025-01-01-preview"
-        self.use_azure = False
         self.fallback_provider = fallback_provider or FallbackTemplateProvider()
         self._cache: dict[str, str] = {}
         self.last_usage = TokenUsage()
@@ -152,19 +153,16 @@ class OpenAIProvider(LLMProvider):
         return response
 
     def health_check(self) -> bool:
-        """Check whether the configured provider is reachable."""
+        """Check whether OpenAI is configured and reachable."""
         if not self.api_key:
             return False
 
         try:
             with httpx.Client(timeout=self.timeout_seconds) as client:
-                if self.use_azure:
-                    url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.model_name}?api-version={self.azure_api_version}"
-                    headers = {"api-key": self.api_key}
-                else:
-                    url = f"https://api.openai.com/v1/models/{self.model_name}"
-                    headers = {"Authorization": f"Bearer {self.api_key}"}
-                response = client.get(url, headers=headers)
+                response = client.get(
+                    f"https://api.openai.com/v1/models/{self.model_name}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
             return response.status_code < 500
         except httpx.HTTPError as exc:
             logger.warning("openai_health_check_failed", error=str(exc))
@@ -193,44 +191,51 @@ class OpenAIProvider(LLMProvider):
     def _call_openai(self, prompt: str) -> str:
         started = time.perf_counter()
         payload = {
+            "model": self.model_name,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0,
             "max_tokens": 500,
-        }
-        payload["model"] = self.model_name
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "vera_message",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "message": {"type": "string"},
-                        "cta": {
-                            "type": "string",
-                            "enum": ["binary_yes_stop", "open_ended", "none"],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "vera_action_response",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "action": {"type": "string", "enum": ["send", "wait", "end"]},
+                            "body": {"type": ["string", "null"]},
+                            "cta": {"type": ["string", "null"]},
+                            "rationale": {"type": "string"},
+                            "wait_seconds": {"type": ["integer", "null"]},
                         },
-                        "rationale": {"type": "string"},
+                        "required": [
+                            "action",
+                            "body",
+                            "cta",
+                            "rationale",
+                            "wait_seconds",
+                        ],
                     },
-                    "required": ["message", "cta", "rationale"],
                 },
             },
         }
 
-        client = Groq(api_key=self.api_key)
-        response = client.chat.completions.create(
-            model=self.model_name,
-            messages=payload["messages"],
-            temperature=payload["temperature"],
-            max_tokens=payload["max_tokens"],
-            response_format={"type": "json_object"},
-        )
-        data = response.model_dump()
+        with httpx.Client(timeout=self.timeout_seconds) as client:
+            response = client.post(
+                OPENAI_CHAT_COMPLETIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
 
         content = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
@@ -253,17 +258,7 @@ class OpenAIProvider(LLMProvider):
         self._assert_json(content)
         return content
 
-    def _chat_completions_url(self) -> str:
-        return OPENAI_CHAT_COMPLETIONS_URL
-
-    def _request_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
     def _estimate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
-        """Estimate cost conservatively when exact model pricing is configured elsewhere."""
         input_per_million = 0.15
         output_per_million = 0.60
         return round(
@@ -281,9 +276,48 @@ class OpenAIProvider(LLMProvider):
             raise ValueError("OpenAI response was not a JSON object")
 
 
-SYSTEM_PROMPT = """You are Vera's language realization layer.
-Convert the provided Decision Card and minimal facts into one WhatsApp message.
-You must not choose opportunities, rank triggers, create offers, invent facts,
-invent prices, invent dates, invent research, invent statistics, change the CTA,
-or override the Decision Card. Return valid JSON only with exactly these keys:
-message, cta, rationale."""
+SYSTEM_PROMPT = """You are Vera, an AI business growth assistant for magicpin.
+
+Your job is NOT to chat naturally.
+Your job is to move the merchant toward a concrete business outcome in every turn.
+
+Return ONLY valid JSON matching the API schema.
+
+You receive:
+- Merchant Context
+- Category Context
+- Trigger Context
+- Conversation History
+- Current Merchant Message
+
+Your response must always choose exactly one action:
+1. send
+2. wait
+3. end
+
+Every response must create measurable progress.
+Never acknowledge without acting.
+If the merchant has already agreed, do not ask another qualification question.
+Immediately switch into execution and finish with one concrete CTA.
+Treat common business autoresponders as auto replies.
+For the first auto reply, send one short note for the owner.
+For the second identical auto reply, wait for 86400 seconds.
+For the third identical auto reply, end.
+For hostile messages such as stop messaging, leave me alone, spam, not interested,
+or go away, end immediately.
+For out-of-scope asks such as GST, tax, legal, banking, or medical advice,
+briefly decline and redirect to the current business conversation.
+
+Every body must be specific, concrete, actionable, short, personalized, and based
+only on supplied context. Never fabricate statistics, offers, customers, dates,
+research, or merchant facts.
+
+Return only JSON:
+{
+  "action": "send|wait|end",
+  "body": "...",
+  "cta": "...",
+  "rationale": "One sentence explaining why this action was chosen.",
+  "wait_seconds": null
+}
+Never output markdown. Never output anything except JSON."""

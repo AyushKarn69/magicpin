@@ -7,9 +7,11 @@ from app.context.stores import (
     MerchantStore,
     TriggerStore,
 )
+from app.context.manager import ContextManager
 
 __all__ = [
     "ContextStore",
+    "ContextManager",
     "CategoryStore",
     "MerchantStore",
     "CustomerStore",

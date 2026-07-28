@@ -35,12 +35,15 @@ class PromptCompiler:
             "trigger_facts": self._trigger_facts(trigger),
             "customer_language": self._customer_language(customer),
             "output_schema": {
-                "message": "string",
+                "action": "send",
+                "body": "string",
                 "cta": card.cta,
                 "rationale": "string",
+                "wait_seconds": None,
             },
             "instructions": [
                 "Return valid JSON only.",
+                "For proactive Decision Card realization, action must be send.",
                 "The cta value must exactly match the Decision Card cta.",
                 "Use only the provided facts.",
                 "Do not invent merchant facts, offers, prices, dates, research, or statistics.",

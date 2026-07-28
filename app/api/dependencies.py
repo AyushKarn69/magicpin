@@ -1,6 +1,5 @@
 """FastAPI dependency injection."""
 
-import os
 from functools import lru_cache
 
 from app.adapters.category_adapter import CategoryAdapterRegistry
@@ -28,8 +27,8 @@ class AppState:
         settings = get_settings()
         self.adapter_registry = CategoryAdapterRegistry()
         self.llm_provider: LLMProvider = OpenAIProvider(
-            api_key=settings.openai_api_key or os.getenv("magicpin", ""),
-            model_name="llama-3.3-70b-versatile",
+            api_key=settings.openai_api_key,
+            model_name=settings.model_name,
             fallback_provider=FallbackTemplateProvider(),
         )
         
@@ -43,6 +42,7 @@ class AppState:
             conversation_store=self.conversation_store,
             adapter_registry=self.adapter_registry,
             llm_provider=self.llm_provider,
+            context_manager=self.context_manager,
         )
 
 
