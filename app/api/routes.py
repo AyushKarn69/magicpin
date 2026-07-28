@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.dependencies import (
     get_context_manager,
@@ -221,6 +221,8 @@ async def reply(
     # Get or create conversation session
     session = conversation_store.get_session(request.conversation_id)
     if not session:
+        if request.turn_number != 1:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         conversation_store.create_session(
             conversation_id=request.conversation_id,
             merchant_id=request.merchant_id,
