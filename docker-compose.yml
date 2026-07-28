@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  vera-api:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app:ro
+      - ./dataset:/app/dataset:ro
+    restart: unless-stopped
